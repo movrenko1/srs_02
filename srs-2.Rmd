@@ -1,0 +1,263 @@
+---
+title: "SRS №2"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+#Модели на основе деревьев
+
+#Деревья решений
+Данные: Polish_Comp_Bnkrp_2year_for_models.csv и Polish_Comp_Bnkrp_2year_for_forecast.csv
+
+```{r  first}
+warning = F
+# Загрузка пакетов
+library('GGally')            # матричный график разброса ggpairs()
+library('randomForest')      # случайный лес randomForest()
+library('gbm')               # бустинг gbm()
+library('rpart') 
+library('e1071')     # SVM
+library('ROCR')      # ROC-кривые
+library('tree')
+#загружаем данные 
+polish <- read.csv('Polish_Comp_Bnkrp_2year_for_models.csv', 
+                   header = T,
+                   dec = ',',
+                   sep = ';')
+polish$class <- as.factor(polish$class)
+reg.df <- polish
+dim(reg.df)
+head(reg.df)
+summary(reg.df)
+my.seed <- 13
+set.seed(my.seed)
+# общее число наблюдений
+n <- nrow(reg.df)
+# доля обучающей выборки
+train.percent <- 0.5
+# выбрать наблюдения в обучающую выборку
+set.seed(my.seed)
+inTrain <- sample(n, n * train.percent)
+train <- sample(n, n * train.percent)
+```
+
+#Регрессионные деревья
+
+```{r second}
+# обучаем модель
+reg.df$class <- as.numeric(reg.df$class)
+tree.polish <- tree(class ~ . , reg.df )
+summary(tree.polish)
+tree.polish                  # посмотреть всё дерево в консоли
+# прогноз по лучшей модели 
+yhat <- predict(tree.polish, newdata = reg.df[-train, ])
+polish.test <- reg.df[-train, 'class']
+# MSE 
+mse.test <- mean((yhat - polish.test)^2)
+mse.test
+# график "прогноз-реализация"
+plot(yhat, polish.test)
+# линия идеального прогноза
+abline(0, 1)
+```
+
+MSE на тестовой выборке равна 0.04.
+
+#Бэггинг и метод случайного леса
+
+
+Рассмотрим более сложные методы улучшения качества дерева. Бэггинг – частный случай случайного леса с m=p, поэтому и то, и другое можно построить функцией randomForest().
+
+Для начала используем бэггинг, причём возьмём все 5 предикторов на каждом шаге (аргумент mtry).
+
+```{r third}
+# бэггинг с 5 предикторами
+set.seed(my.seed)
+bag.polish <- randomForest(class ~ ., data = reg.df, subset = train, 
+                           mtry = 5, importance = TRUE)
+bag.polish
+
+# прогноз
+yhat.bag = predict(bag.polish, newdata = reg.df[-train, ])
+# график "прогноз -- реализация"
+plot(yhat.bag, polish.test)
+# линия идеального прогноза
+abline(0, 1)
+# MSE на тестовой
+mse.test <- c(mse.test, mean((yhat.bag - polish.test)^2))
+names(mse.test)[length(mse.test)] <- 'polish.bag.5'
+mse.test
+```
+
+Ошибка на тестовой выборке равна 0.42.
+Можно изменить число деревьев с помощью аргумента ntree.
+
+```{r fourth}
+# бэггинг с 5 предикторами и 25 деревьями
+bag.polish <- randomForest(class ~ ., data = reg.df, subset = train,
+                           mtry = 5, ntree = 25)
+
+# прогноз
+yhat.bag <- predict(bag.polish, newdata = reg.df[-train, ])
+
+# MSE на тестовой
+mse.test <- c(mse.test, mean((yhat.bag - polish.test)^2))
+names(mse.test)[length(mse.test)] <- 'polish.bag.5.25'
+mse.test
+
+```
+
+Rак видно, это не на много, но ухудшает прогноз.
+Теперь попробуем вырастить случайный лес. Берём 3 предикторов на каждом шаге.
+
+```{r fifth}
+# обучаем модель
+set.seed(my.seed)
+rf.polish <- randomForest(class ~ ., data = reg.df, subset = train,
+                          mtry = 3, importance = TRUE)
+
+# прогноз
+yhat.rf <- predict(rf.polish, newdata = reg.df[-train, ])
+
+# MSE на тестовой выборке
+mse.test <- c(mse.test, mean((yhat.rf - polish.test)^2))
+names(mse.test)[length(mse.test)] <- 'polish.rf.3'
+mse.test
+
+# важность предикторов
+importance(rf.polish)  # оценки 
+varImpPlot(rf.polish)  # графики
+
+```
+
+Наиболее важными предикторами по методам Бэггинг и метод случайного леса оказались Attr1, Attr7/ Attr2, Attr1.
+
+#Бустинг#
+
+Построим 5000 регрессионных деревьев с глубиной 4.
+
+```{r sixth}
+set.seed(my.seed)
+boost.polish <- gbm(class ~ ., data = reg.df[train, ], 
+                    distribution = "gaussian",
+                    n.trees = 5000, interaction.depth = 4)
+# график и таблица относительной важности переменных
+summary(boost.polish)
+# графики частной зависимости для двух наиболее важных предикторов
+par(mfrow = c(1, 2))
+plot(boost.polish, i = "Attr2")
+plot(boost.polish, i = "Attr3")
+# прогноз
+yhat.boost <- predict(boost.polish, newdata = reg.df[-train, ], 
+                      n.trees = 5000)
+
+# MSE на тестовой
+mse.test <- c(mse.test, mean((yhat.boost - polish.test)^2))
+names(mse.test)[length(mse.test)] <- 'polish.boost.opt'
+mse.test
+
+# меняем значение гиперпараметра (lambda) на 0.2 -- аргумент shrinkage
+boost.polish <- gbm(class ~ ., data = reg.df[train, ], 
+                    distribution = "gaussian",
+                    n.trees = 5000, interaction.depth = 4, 
+                    shrinkage = 0.2, verbose = F)
+
+# прогноз
+yhat.boost <- predict(boost.polish, newdata = reg.df[-train, ],
+                      n.trees = 5000)
+
+# MSE а тестовой
+mse.test <- c(mse.test, mean((yhat.boost - polish.test)^2))
+names(mse.test)[length(mse.test)] <- 'polish.boost.0.2'
+mse.test
+```
+
+#Машины опорных векторов
+#Машина опорных векторов с радиальным ядром.
+Рассмотрим модель с наиболее важными предикторами, которые мы выявили методом Бэггинга.
+
+```{r seventh}
+polish1 <- read.csv('Polish_Comp_Bnkrp_2year_for_forecast.csv', 
+                    header = T,
+                    dec = ',',
+                    sep = ';')
+df <- polish1
+cclass <- reg.df$class
+cclass <- as.factor(cclass)
+attach(df)
+df <- data.frame(df, cclass) 
+# таблица с данными, отклик — фактор 
+dat <- data.frame(Attr1, Attr7, cclass) 
+plot(Attr1, Attr7, col = cclass, pch = 19)
+train <- sample(1:nrow(dat), nrow(dat)/2) # обучающая выборка -- 50%
+# SVM с с полиномиальным ядром второй степени  и маленьким cost
+svmfit <- svm(cclass ~ ., data = dat[train, ], kernel = "radial", 
+              gamma = 1, cost = 1)
+plot(svmfit, dat[train, ])
+summary(svmfit)
+# SVM с с полиномиальным ядром второй степени и большим cost
+svmfit <- svm(cclass ~ ., data = dat[train, ], kernel = "radial", 
+              gamma = 1, cost = 1e2)
+plot(svmfit, dat[train, ])
+# перекрёстная проверка
+set.seed(my.seed)
+tune.out <- tune(svm,cclass  ~ ., data = dat[train, ], kernel = "radial", 
+                 ranges = list(cost = c(0.1, 1, 10),
+                               gamma = c(0.5, 1, 2, 3, 4)))
+summary(tune.out)
+# матрица неточностей для прогноза по лучшей модели
+tab <- table(true = dat[-train, "cclass"], 
+             pred = predict(tune.out$best.model, 
+                            newdata = dat[-train, ]))
+tab
+modl <- tune.out$best.model
+summary(modl)
+
+#MSE
+sum(diag(tab)/sum(tab))
+```
+
+Точность модели достаточно высока.
+
+#ROC-кривые
+```{r eighth}
+# функция построения ROC-кривой: pred -- прогноз, truth -- факт
+rocplot <- function(pred, truth, ...){
+  predob = prediction(pred, truth)
+  perf = performance(predob, "tpr", "fpr")
+  plot(perf,...)}
+
+# последняя оптимальная модель
+svmfit.opt <- svm(cclass ~ ., data = dat[train, ], 
+                  kernel = "radial", gamma = 0.5, 
+                  cost = 10, decision.values = T)
+
+# количественные модельные значения, на основе которых присваивается класс
+fitted <- attributes(predict(svmfit.opt, dat[train, ],
+                             decision.values = TRUE))$decision.values
+
+# график для обучающей выборки
+par(mfrow = c(1, 2))
+rocplot(fitted, dat[train, "cclass"], main = "Training Data")
+
+# более гибкая модель (gamma выше)
+svmfit.flex = svm(cclass ~ ., data = dat[train, ], kernel = "radial", 
+                  gamma = 25, cost = 10, decision.values = T)
+fitted <- attributes(predict(svmfit.flex, dat[train, ], 
+                             decision.values = T))$decision.values
+rocplot(fitted, dat[train,"cclass"], add = T, col = "red")
+
+# график для тестовой выборки
+fitted <- attributes(predict(svmfit.opt, dat[-train, ], 
+                             decision.values = T))$decision.values
+rocplot(fitted, dat[-train, "cclass"], main = "Test Data")
+fitted <- attributes(predict(svmfit.flex, dat[-train, ], 
+                             decision.values = T))$decision.values
+rocplot(fitted, dat[-train, "cclass"], add = T, col = "red")
+
+
+```
+
+ROC-кривые показывают недостаточное количество точных предсказаний. Возможно это связано с малым количеством объясняющих переменных.
